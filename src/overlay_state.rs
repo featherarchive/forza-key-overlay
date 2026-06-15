@@ -23,6 +23,12 @@ impl KeySnapshot {
         }
     }
 
+    pub fn from_iter(keys: impl IntoIterator<Item = DisplayKey>) -> Self {
+        Self {
+            pressed: keys.into_iter().collect(),
+        }
+    }
+
     pub fn is_pressed(&self, key: DisplayKey) -> bool {
         self.pressed.contains(&key)
     }
@@ -78,7 +84,10 @@ mod tests {
     fn updates_pressed_keys_from_snapshot() {
         let mut overlay = OverlayState::new();
 
-        overlay.update_keys(KeySnapshot::from_pressed([DisplayKey::W, DisplayKey::Space]));
+        overlay.update_keys(KeySnapshot::from_pressed([
+            DisplayKey::W,
+            DisplayKey::Space,
+        ]));
 
         assert!(overlay.is_pressed(DisplayKey::W));
         assert!(overlay.is_pressed(DisplayKey::Space));
@@ -96,5 +105,14 @@ mod tests {
         overlay.update_toggle_key(false);
         overlay.update_toggle_key(true);
         assert!(overlay.visible());
+    }
+
+    #[test]
+    fn creates_snapshot_from_polled_keys() {
+        let snapshot = KeySnapshot::from_iter(vec![DisplayKey::A, DisplayKey::D]);
+
+        assert!(snapshot.is_pressed(DisplayKey::A));
+        assert!(snapshot.is_pressed(DisplayKey::D));
+        assert!(!snapshot.is_pressed(DisplayKey::W));
     }
 }
