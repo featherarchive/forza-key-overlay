@@ -14,23 +14,27 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VK_CONTROL, VK_SHIFT, VK_SPACE,
 };
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
+    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-    DispatchMessageW, GWL_EXSTYLE, GWLP_USERDATA, GetMessageW, GetWindowLongPtrW, HMENU, HTCAPTION,
-    HWND_TOPMOST, IDC_ARROW, IDI_APPLICATION, KillTimer, LWA_COLORKEY, LoadCursorW, LoadIconW, MSG,
-    PostQuitMessage, RegisterClassExW, SW_HIDE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WM_CREATE, WM_DESTROY, WM_NCCREATE,
-    WM_NCHITTEST, WM_PAINT, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    AppendMenuW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreatePopupMenu,
+    CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
+    GetCursorPos, GetMessageW, GetWindowLongPtrW, GetWindowRect, HMENU, HTCAPTION, HTTRANSPARENT,
+    HWND_TOPMOST, IDC_ARROW, IDI_APPLICATION, KillTimer, LWA_COLORKEY, LoadCursorW, LoadIconW,
+    MF_STRING, MSG, PostMessageW, PostQuitMessage, RegisterClassExW, SW_HIDE, SW_SHOW,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow, SetLayeredWindowAttributes,
+    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
+    TPM_NONOTIFY, TPM_RETURNCMD, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_CREATE,
+    WM_DESTROY, WM_LBUTTONUP, WM_NCCREATE, WM_NCHITTEST, WM_NULL, WM_PAINT, WM_TIMER, WNDCLASSEXW,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{Error, PCWSTR, Result};
 
 const TIMER_ID: usize = 1;
 const TIMER_MS: u32 = 16;
 const TRAY_ICON_ID: u32 = 1;
+const TRAY_MESSAGE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 1;
+const QUIT_COMMAND_ID: usize = 1001;
 const TRANSPARENT_COLOR: COLORREF = COLORREF(0);
 const WINDOW_W: i32 = 260;
 const WINDOW_H: i32 = 520;
@@ -40,10 +44,13 @@ const SMALL_W: i32 = 84;
 const SPACE_W: i32 = KEY * 3 + GAP * 2;
 const LEFT: i32 = 24;
 const TOP: i32 = 220;
+const DRAG_DOT_SIZE: i32 = 12;
+const DRAG_DOT_HIT: i32 = 24;
+const DRAG_DOT_X: i32 = LEFT + KEY + GAP - 24;
+const DRAG_DOT_Y: i32 = TOP + (KEY - DRAG_DOT_SIZE) / 2;
 
 struct AppState {
     overlay: OverlayState,
-    accepts_mouse: bool,
 }
 
 pub fn run() -> Result<()> {
@@ -66,17 +73,12 @@ pub fn run() -> Result<()> {
 
         let mut app_state = Box::new(AppState {
             overlay: OverlayState::new(),
-            accepts_mouse: false,
         });
         let state_ptr = app_state.as_mut() as *mut AppState;
 
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(
-                WS_EX_LAYERED.0
-                    | WS_EX_TRANSPARENT.0
-                    | WS_EX_TOPMOST.0
-                    | WS_EX_TOOLWINDOW.0
-                    | WS_EX_NOACTIVATE.0,
+                WS_EX_LAYERED.0 | WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0,
             ),
             PCWSTR(class_name.as_ptr()),
             PCWSTR(wide("Forza Key Overlay").as_ptr()),
@@ -131,7 +133,6 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 if wparam.0 == TIMER_ID {
                     if let Some(state) = app_state(hwnd) {
                         poll_keys(state);
-                        sync_move_mode(hwnd, state);
                         let _ = ShowWindow(
                             hwnd,
                             if state.overlay.visible() {
@@ -149,13 +150,17 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 paint(hwnd);
                 LRESULT(0)
             }
-            WM_NCHITTEST => {
-                if let Some(state) = app_state(hwnd) {
-                    if state.overlay.move_mode() {
-                        return LRESULT(HTCAPTION as isize);
-                    }
+            TRAY_MESSAGE => {
+                if lparam.0 as u32 == WM_LBUTTONUP {
+                    show_tray_menu(hwnd);
                 }
-                DefWindowProcW(hwnd, msg, wparam, lparam)
+                LRESULT(0)
+            }
+            WM_NCHITTEST => {
+                if hit_test_drag_dot(hwnd, lparam) {
+                    return LRESULT(HTCAPTION as isize);
+                }
+                LRESULT(HTTRANSPARENT as isize)
             }
             WM_DESTROY => {
                 let _ = KillTimer(hwnd, TIMER_ID);
@@ -194,7 +199,8 @@ unsafe fn tray_icon_data(hwnd: HWND) -> Result<NOTIFYICONDATAW> {
         cbSize: size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,
         uID: TRAY_ICON_ID,
-        uFlags: NIF_ICON | NIF_TIP,
+        uFlags: NIF_ICON | NIF_TIP | NIF_MESSAGE,
+        uCallbackMessage: TRAY_MESSAGE,
         hIcon: LoadIconW(None, IDI_APPLICATION)?,
         ..Default::default()
     })
@@ -207,7 +213,6 @@ unsafe fn app_state(hwnd: HWND) -> Option<&'static mut AppState> {
 
 unsafe fn poll_keys(state: &mut AppState) {
     state.overlay.update_toggle_key(key_down(u16::from(b'U')));
-    state.overlay.update_move_key(key_down(u16::from(b'M')));
 
     let mut keys = Vec::new();
     for (display_key, vk) in [
@@ -227,35 +232,59 @@ unsafe fn poll_keys(state: &mut AppState) {
     state.overlay.update_keys(KeySnapshot::from_iter(keys));
 }
 
-unsafe fn sync_move_mode(hwnd: HWND, state: &mut AppState) {
-    let should_accept_mouse = state.overlay.move_mode();
-    if state.accepts_mouse == should_accept_mouse {
-        return;
-    }
-
-    let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-    let transparent = WS_EX_TRANSPARENT.0 as isize;
-    let next = if should_accept_mouse {
-        current & !transparent
-    } else {
-        current | transparent
-    };
-
-    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next);
-    let _ = SetWindowPos(
-        hwnd,
-        HWND_TOPMOST,
-        0,
-        0,
-        0,
-        0,
-        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-    );
-    state.accepts_mouse = should_accept_mouse;
-}
-
 unsafe fn key_down(vk: u16) -> bool {
     (GetAsyncKeyState(i32::from(vk)) as u16 & 0x8000) != 0
+}
+
+unsafe fn hit_test_drag_dot(hwnd: HWND, lparam: LPARAM) -> bool {
+    let mut rect = RECT::default();
+    if GetWindowRect(hwnd, &mut rect).is_err() {
+        return false;
+    }
+
+    let screen_x = signed_low_word(lparam.0);
+    let screen_y = signed_high_word(lparam.0);
+    let x = screen_x - rect.left;
+    let y = screen_y - rect.top;
+    let hit_left = DRAG_DOT_X - (DRAG_DOT_HIT - DRAG_DOT_SIZE) / 2;
+    let hit_top = DRAG_DOT_Y - (DRAG_DOT_HIT - DRAG_DOT_SIZE) / 2;
+
+    x >= hit_left && x <= hit_left + DRAG_DOT_HIT && y >= hit_top && y <= hit_top + DRAG_DOT_HIT
+}
+
+unsafe fn show_tray_menu(hwnd: HWND) {
+    let Ok(menu) = CreatePopupMenu() else {
+        return;
+    };
+
+    if AppendMenuW(
+        menu,
+        MF_STRING,
+        QUIT_COMMAND_ID,
+        PCWSTR(wide("Quit").as_ptr()),
+    )
+    .is_ok()
+    {
+        let mut cursor = POINT::default();
+        if GetCursorPos(&mut cursor).is_ok() {
+            let _ = SetForegroundWindow(hwnd);
+            let selected = TrackPopupMenu(
+                menu,
+                TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RETURNCMD | TPM_NONOTIFY,
+                cursor.x,
+                cursor.y,
+                0,
+                hwnd,
+                None,
+            );
+            if selected.0 as usize == QUIT_COMMAND_ID {
+                let _ = DestroyWindow(hwnd);
+            }
+            let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
+        }
+    }
+
+    let _ = DestroyMenu(menu);
 }
 
 unsafe fn paint(hwnd: HWND) {
@@ -275,6 +304,7 @@ unsafe fn paint(hwnd: HWND) {
     let _ = DeleteObject(HGDIOBJ(bg.0));
 
     if let Some(state) = app_state(hwnd) {
+        draw_drag_dot(hdc);
         draw_key(
             hdc,
             DisplayKey::W,
@@ -348,6 +378,28 @@ unsafe fn paint(hwnd: HWND) {
     }
 
     let _ = EndPaint(hwnd, &ps);
+}
+
+unsafe fn draw_drag_dot(hdc: HDC) {
+    draw_glow(hdc, DRAG_DOT_X, DRAG_DOT_Y, DRAG_DOT_SIZE, DRAG_DOT_SIZE);
+
+    let brush = CreateSolidBrush(rgb(130, 18, 24));
+    let pen = CreatePen(PS_SOLID, 2, rgb(255, 84, 84));
+    let old_brush = SelectObject(hdc, HGDIOBJ(brush.0));
+    let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
+
+    let _ = Ellipse(
+        hdc,
+        DRAG_DOT_X,
+        DRAG_DOT_Y,
+        DRAG_DOT_X + DRAG_DOT_SIZE,
+        DRAG_DOT_Y + DRAG_DOT_SIZE,
+    );
+
+    SelectObject(hdc, old_pen);
+    SelectObject(hdc, old_brush);
+    let _ = DeleteObject(HGDIOBJ(pen.0));
+    let _ = DeleteObject(HGDIOBJ(brush.0));
 }
 
 unsafe fn draw_key(
@@ -453,4 +505,12 @@ fn copy_wide_fixed<const N: usize>(target: &mut [u16; N], value: &str) {
     {
         *slot = code_unit;
     }
+}
+
+fn signed_low_word(value: isize) -> i32 {
+    (value as u16) as i16 as i32
+}
+
+fn signed_high_word(value: isize) -> i32 {
+    ((value >> 16) as u16) as i16 as i32
 }
