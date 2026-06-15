@@ -13,20 +13,24 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VK_CONTROL, VK_SHIFT, VK_SPACE,
 };
+use windows::Win32::UI::Shell::{
+    NIF_ICON, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
     DispatchMessageW, GWL_EXSTYLE, GWLP_USERDATA, GetMessageW, GetWindowLongPtrW, HMENU, HTCAPTION,
-    HWND_TOPMOST, IDC_ARROW, KillTimer, LWA_COLORKEY, LoadCursorW, MSG, PostQuitMessage,
-    RegisterClassExW, SW_HIDE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    TranslateMessage, WINDOW_EX_STYLE, WM_CREATE, WM_DESTROY, WM_NCCREATE, WM_NCHITTEST, WM_PAINT,
-    WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    HWND_TOPMOST, IDC_ARROW, IDI_APPLICATION, KillTimer, LWA_COLORKEY, LoadCursorW, LoadIconW, MSG,
+    PostQuitMessage, RegisterClassExW, SW_HIDE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WM_CREATE, WM_DESTROY, WM_NCCREATE,
+    WM_NCHITTEST, WM_PAINT, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
-use windows::core::{PCWSTR, Result};
+use windows::core::{Error, PCWSTR, Result};
 
 const TIMER_ID: usize = 1;
 const TIMER_MS: u32 = 16;
+const TRAY_ICON_ID: u32 = 1;
 const TRANSPARENT_COLOR: COLORREF = COLORREF(0);
 const WINDOW_W: i32 = 260;
 const WINDOW_H: i32 = 520;
@@ -100,6 +104,7 @@ pub fn run() -> Result<()> {
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         )?;
         let _ = ShowWindow(hwnd, SW_SHOW);
+        add_tray_icon(hwnd)?;
         SetTimer(hwnd, TIMER_ID, TIMER_MS, None);
 
         let mut message = MSG::default();
@@ -154,6 +159,7 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             }
             WM_DESTROY => {
                 let _ = KillTimer(hwnd, TIMER_ID);
+                delete_tray_icon(hwnd);
                 let ptr = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) as *mut AppState;
                 if !ptr.is_null() {
                     drop(Box::from_raw(ptr));
@@ -164,6 +170,34 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
     }
+}
+
+unsafe fn add_tray_icon(hwnd: HWND) -> Result<()> {
+    let mut data = tray_icon_data(hwnd)?;
+    copy_wide_fixed(&mut data.szTip, "Forza Key Overlay");
+
+    if Shell_NotifyIconW(NIM_ADD, &data).as_bool() {
+        Ok(())
+    } else {
+        Err(Error::from_win32())
+    }
+}
+
+unsafe fn delete_tray_icon(hwnd: HWND) {
+    if let Ok(data) = tray_icon_data(hwnd) {
+        let _ = Shell_NotifyIconW(NIM_DELETE, &data);
+    }
+}
+
+unsafe fn tray_icon_data(hwnd: HWND) -> Result<NOTIFYICONDATAW> {
+    Ok(NOTIFYICONDATAW {
+        cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: TRAY_ICON_ID,
+        uFlags: NIF_ICON | NIF_TIP,
+        hIcon: LoadIconW(None, IDI_APPLICATION)?,
+        ..Default::default()
+    })
 }
 
 unsafe fn app_state(hwnd: HWND) -> Option<&'static mut AppState> {
@@ -328,7 +362,7 @@ unsafe fn draw_key(
 ) {
     let pressed = state.overlay.is_pressed(key);
     let border = if pressed {
-        rgb(231, 251, 255)
+        rgb(255, 84, 84)
     } else {
         rgb(168, 219, 240)
     };
@@ -339,8 +373,18 @@ unsafe fn draw_key(
         draw_glow(hdc, x, y, w, h);
     }
 
+    let brush = if pressed {
+        Some(CreateSolidBrush(rgb(82, 12, 18)))
+    } else {
+        None
+    };
     let pen = CreatePen(PS_SOLID, pen_width, border);
-    let old_brush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+    let old_brush = SelectObject(
+        hdc,
+        brush
+            .map(|brush| HGDIOBJ(brush.0))
+            .unwrap_or_else(|| GetStockObject(HOLLOW_BRUSH)),
+    );
     let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
 
     let _ = Rectangle(hdc, x, y, x + w, y + h);
@@ -348,9 +392,12 @@ unsafe fn draw_key(
     SelectObject(hdc, old_pen);
     SelectObject(hdc, old_brush);
     let _ = DeleteObject(HGDIOBJ(pen.0));
+    if let Some(brush) = brush {
+        let _ = DeleteObject(HGDIOBJ(brush.0));
+    }
 
     let highlight_color = if pressed {
-        rgb(255, 255, 255)
+        rgb(255, 176, 176)
     } else {
         rgb(245, 253, 255)
     };
@@ -376,7 +423,7 @@ unsafe fn draw_key(
 }
 
 unsafe fn draw_glow(hdc: HDC, x: i32, y: i32, w: i32, h: i32) {
-    let glow = CreatePen(PS_SOLID, 1, rgb(108, 220, 255));
+    let glow = CreatePen(PS_SOLID, 1, rgb(255, 36, 36));
     let old_pen = SelectObject(hdc, HGDIOBJ(glow.0));
     let old_brush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
 
@@ -396,4 +443,14 @@ fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
 
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
+}
+
+fn copy_wide_fixed<const N: usize>(target: &mut [u16; N], value: &str) {
+    for (slot, code_unit) in target
+        .iter_mut()
+        .take(N.saturating_sub(1))
+        .zip(value.encode_utf16())
+    {
+        *slot = code_unit;
+    }
 }
