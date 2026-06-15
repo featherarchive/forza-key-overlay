@@ -38,6 +38,8 @@ impl KeySnapshot {
 pub struct OverlayState {
     visible: bool,
     toggle_was_down: bool,
+    move_mode: bool,
+    move_was_down: bool,
     keys: KeySnapshot,
 }
 
@@ -52,6 +54,8 @@ impl OverlayState {
         Self {
             visible: true,
             toggle_was_down: false,
+            move_mode: false,
+            move_was_down: false,
             keys: KeySnapshot::default(),
         }
     }
@@ -65,6 +69,17 @@ impl OverlayState {
             self.visible = !self.visible;
         }
         self.toggle_was_down = is_down;
+    }
+
+    pub fn move_mode(&self) -> bool {
+        self.move_mode
+    }
+
+    pub fn update_move_key(&mut self, is_down: bool) {
+        if is_down && !self.move_was_down {
+            self.move_mode = !self.move_mode;
+        }
+        self.move_was_down = is_down;
     }
 
     pub fn update_keys(&mut self, snapshot: KeySnapshot) {
@@ -114,5 +129,18 @@ mod tests {
         assert!(snapshot.is_pressed(DisplayKey::A));
         assert!(snapshot.is_pressed(DisplayKey::D));
         assert!(!snapshot.is_pressed(DisplayKey::W));
+    }
+
+    #[test]
+    fn toggles_move_mode_once_per_m_press() {
+        let mut overlay = OverlayState::new();
+
+        overlay.update_move_key(true);
+        overlay.update_move_key(true);
+        assert!(overlay.move_mode());
+
+        overlay.update_move_key(false);
+        overlay.update_move_key(true);
+        assert!(!overlay.move_mode());
     }
 }

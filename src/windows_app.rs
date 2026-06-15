@@ -15,12 +15,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-    DispatchMessageW, GWLP_USERDATA, GetMessageW, HMENU, HWND_TOPMOST, IDC_ARROW, KillTimer,
-    LWA_COLORKEY, LoadCursorW, MSG, PostQuitMessage, RegisterClassExW, SW_HIDE, SW_SHOW,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetLayeredWindowAttributes, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WM_CREATE,
-    WM_DESTROY, WM_NCCREATE, WM_PAINT, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    DispatchMessageW, GWL_EXSTYLE, GWLP_USERDATA, GetMessageW, GetWindowLongPtrW, HMENU, HTCAPTION,
+    HWND_TOPMOST, IDC_ARROW, KillTimer, LWA_COLORKEY, LoadCursorW, MSG, PostQuitMessage,
+    RegisterClassExW, SW_HIDE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    TranslateMessage, WINDOW_EX_STYLE, WM_CREATE, WM_DESTROY, WM_NCCREATE, WM_NCHITTEST, WM_PAINT,
+    WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{PCWSTR, Result};
 
@@ -38,6 +39,7 @@ const TOP: i32 = 220;
 
 struct AppState {
     overlay: OverlayState,
+    accepts_mouse: bool,
 }
 
 pub fn run() -> Result<()> {
@@ -60,6 +62,7 @@ pub fn run() -> Result<()> {
 
         let mut app_state = Box::new(AppState {
             overlay: OverlayState::new(),
+            accepts_mouse: false,
         });
         let state_ptr = app_state.as_mut() as *mut AppState;
 
@@ -123,6 +126,7 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 if wparam.0 == TIMER_ID {
                     if let Some(state) = app_state(hwnd) {
                         poll_keys(state);
+                        sync_move_mode(hwnd, state);
                         let _ = ShowWindow(
                             hwnd,
                             if state.overlay.visible() {
@@ -140,6 +144,14 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 paint(hwnd);
                 LRESULT(0)
             }
+            WM_NCHITTEST => {
+                if let Some(state) = app_state(hwnd) {
+                    if state.overlay.move_mode() {
+                        return LRESULT(HTCAPTION as isize);
+                    }
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
             WM_DESTROY => {
                 let _ = KillTimer(hwnd, TIMER_ID);
                 let ptr = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) as *mut AppState;
@@ -155,13 +167,13 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
 }
 
 unsafe fn app_state(hwnd: HWND) -> Option<&'static mut AppState> {
-    let ptr = windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(hwnd, GWLP_USERDATA)
-        as *mut AppState;
+    let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppState;
     ptr.as_mut()
 }
 
 unsafe fn poll_keys(state: &mut AppState) {
     state.overlay.update_toggle_key(key_down(u16::from(b'U')));
+    state.overlay.update_move_key(key_down(u16::from(b'M')));
 
     let mut keys = Vec::new();
     for (display_key, vk) in [
@@ -179,6 +191,33 @@ unsafe fn poll_keys(state: &mut AppState) {
     }
 
     state.overlay.update_keys(KeySnapshot::from_iter(keys));
+}
+
+unsafe fn sync_move_mode(hwnd: HWND, state: &mut AppState) {
+    let should_accept_mouse = state.overlay.move_mode();
+    if state.accepts_mouse == should_accept_mouse {
+        return;
+    }
+
+    let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    let transparent = WS_EX_TRANSPARENT.0 as isize;
+    let next = if should_accept_mouse {
+        current & !transparent
+    } else {
+        current | transparent
+    };
+
+    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next);
+    let _ = SetWindowPos(
+        hwnd,
+        HWND_TOPMOST,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+    );
+    state.accepts_mouse = should_accept_mouse;
 }
 
 unsafe fn key_down(vk: u16) -> bool {
@@ -288,29 +327,20 @@ unsafe fn draw_key(
     state: &AppState,
 ) {
     let pressed = state.overlay.is_pressed(key);
-    let fill = if pressed {
-        rgb(118, 218, 255)
-    } else {
-        rgb(18, 29, 36)
-    };
     let border = if pressed {
         rgb(231, 251, 255)
     } else {
         rgb(168, 219, 240)
     };
-    let text = if pressed {
-        rgb(3, 13, 18)
-    } else {
-        rgb(240, 251, 255)
-    };
+    let text = rgb(240, 251, 255);
+    let pen_width = if pressed { 4 } else { 2 };
 
     if pressed {
         draw_glow(hdc, x, y, w, h);
     }
 
-    let brush = CreateSolidBrush(fill);
-    let pen = CreatePen(PS_SOLID, 2, border);
-    let old_brush = SelectObject(hdc, HGDIOBJ(brush.0));
+    let pen = CreatePen(PS_SOLID, pen_width, border);
+    let old_brush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
     let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
 
     let _ = Rectangle(hdc, x, y, x + w, y + h);
@@ -318,9 +348,13 @@ unsafe fn draw_key(
     SelectObject(hdc, old_pen);
     SelectObject(hdc, old_brush);
     let _ = DeleteObject(HGDIOBJ(pen.0));
-    let _ = DeleteObject(HGDIOBJ(brush.0));
 
-    let highlight = CreatePen(PS_SOLID, 1, rgb(245, 253, 255));
+    let highlight_color = if pressed {
+        rgb(255, 255, 255)
+    } else {
+        rgb(245, 253, 255)
+    };
+    let highlight = CreatePen(PS_SOLID, 1, highlight_color);
     let old_pen = SelectObject(hdc, HGDIOBJ(highlight.0));
     let _ = MoveToEx(hdc, x + 6, y + 5, Some(&mut POINT::default()));
     let _ = LineTo(hdc, x + w - 6, y + 5);

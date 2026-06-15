@@ -24,7 +24,9 @@ forza-key-overlay.exe
 
 Press `U` to hide or show the overlay. The app keeps running while hidden, so pressing `U` again shows it.
 
-The overlay is always-on-top and click-through, so it should sit above normal windows without stealing mouse input.
+Press `M` to enter or exit move mode. While move mode is on, drag the overlay to reposition it. Press `M` again before driving so the overlay goes back to click-through mode.
+
+The overlay is always-on-top and normally click-through, so it should sit above normal windows without stealing mouse input outside move mode.
 
 ## Game Display Mode
 
